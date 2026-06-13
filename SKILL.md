@@ -13,8 +13,8 @@ not — so the gate lives on the AUR step.
 bundled scripts are **advisory aids, not gates** — `review-pkgbuild.sh` is a
 regex over arbitrary bash and can be evaded by obfuscation; `scan-iocs.sh`
 cannot see a rootkit that hides itself. Treat a "clean" script result as "no
-obvious red flags," never as proof. The human approval in Steps 1 and 4 is the
-real control.
+obvious red flags," never as proof. The human approval (Step 2) plus pikaur's own
+diff prompt at apply time (Step 3) are the real control.
 
 This skill targets **pikaur** (the user's helper). For `yay`/`paru`, adapt the
 commands — AUR enumeration needs a helper (`pikaur -Qua` / `yay -Qua`), **not**
@@ -25,7 +25,9 @@ bare `pacman` (`pacman -Qua` is invalid).
 - Bundled scripts (next to this file; make executable once):
   - `scripts/scan-iocs.sh` — IOC sweep + provides-aware compromised-list cross-check
   - `scripts/review-pkgbuild.sh` — PKGBUILD/.install marker scanner (advisory)
-- `sudo` for the official-repo step
+  - `scripts/plan-update.sh` — clones + pins + scans pending AUR updates (dry run)
+  - `scripts/apply-update.sh` — TOCTOU-guarded single-transaction apply (hard stop)
+- `git`, `sudo` (apply runs `pikaur -Syu` interactively)
 
 ## Hard rules
 1. **Never** pass `--noconfirm` to an AUR build, and never auto-accept a PKGBUILD
@@ -33,10 +35,10 @@ bare `pacman` (`pacman -Qua` is invalid).
    or `pikaur -S*` command. Do not infer approval from your own analysis.
 2. If Step 0 or any later sweep returns **INDICATORS FOUND**, STOP and report —
    do not update on top of a possibly-compromised host.
-3. Hold (skip) any AUR package whose review is `[HIGH]`/NUL, or whose name is a
-   **DIRECT** compromised-list hit. **When anything is held, never run bare
-   `pikaur -Sua`** (it upgrades *all* AUR packages and cannot exclude) — use
-   `pikaur -S <vetted...>` or `pikaur -Sua --ignore <held1> --ignore <held2>`.
+3. Held packages (review `[HIGH]`/NUL/scan-failed, or a **DIRECT** compromised-list
+   hit) are auto-excluded by `apply-update.sh` via `--ignore` in a single
+   `pikaur -Syu` transaction. Never bypass that with a bare `pikaur -Sua`, and
+   never pass `--nodiff`.
 4. A **[VERIFY]** (provides-match) hit is treated as an indicator until a human
    clears it — it may be a benign alias (e.g. `stripe-cli-bin` provides
    `stripe-cli`) **or** a hijacked variant. Verify the actual binary; once
@@ -54,64 +56,41 @@ line: a lone "eBPF maps (needs sudo)" is benign; anything else, look closer.
 `INDICATORS FOUND` → stop, verify each hit, switch to incident response (rotate
 creds, investigate) if confirmed. Capture the printed DIRECT/VERIFY names for Step 2.
 
-### Step 1 — show the official-repo plan, then apply
+### Step 1 — plan (dry run; no changes, no sudo)
+Preview official updates, then run the AUR planner:
 ```bash
-checkupdates 2>/dev/null            # preview official updates without touching anything
+checkupdates 2>/dev/null            # official repo preview (signed/trusted)
+bash ~/.claude/skills/aur-safe-update/scripts/plan-update.sh           # add --devel for -git/-svn pkgs
 ```
-Show the list to the user. **Wait for explicit approval, then:**
-```bash
-sudo pacman -Syu                    # signed packages — trusted
-```
-(If `checkupdates` is missing: `sudo pacman -S pacman-contrib`.)
-⚠️ **Partial-upgrade caveat (Tier-2 TODO):** applying repos here and then holding
-an AUR package leaves an Arch-discouraged partial-upgrade state. If you expect to
-hold AUR packages that link system libs, prefer deferring this until after Step 3,
-or run the whole thing as one `pikaur -Syu` transaction.
+`plan-update.sh` clones each pending AUR package, **pins the exact commit**, scans
+it with `review-pkgbuild.sh`, and diffs it against the last *approved* snapshot. It
+writes `~/.cache/aur-safe-update/plan.tsv` and prints a per-package verdict:
+- **GO** — unchanged since last approval, no markers.
+- **REVIEW** — recipe changed, or a `[REVIEW]`/`[HOOK]` marker — a human reads the shown lines/diff.
+- **HOLD** — `[HIGH]`/NUL/scan-failed (exit 64) — auto-excluded from the upgrade.
+Relay the GO/REVIEW/HOLD list and the diffs/markers shown. (If `checkupdates` is
+missing: `sudo pacman -S pacman-contrib`.)
 
-### Step 2 — enumerate pending AUR updates
-```bash
-pikaur -Qua                         # lists "pkg  old -> new" for AUR only
-pikaur -Qua --devel                 # also include -git/-svn (build from HEAD; highest risk)
-```
-If empty, skip to Step 5. Otherwise cross-check the pending names against the
-DIRECT/VERIFY names from Step 0 and call them out.
+### Step 2 — human approval (hard stop)
+**Stop and wait for an explicit human approval message** before applying — do not
+infer approval from your own analysis. Summarize what will upgrade, what is held,
+and the REVIEW items the human should eyeball. For any **DIRECT**/**[VERIFY]**
+compromised-list hit from Step 0, confirm the package before approving.
 
-### Step 3 — review each AUR PKGBUILD diff  ← the human gate
-For every pending package `$P`, fetch the *incoming* recipe and scan + diff it
-before any build runs:
+### Step 3 — apply (single transaction; human-run, interactive)
+On approval, run **interactively** (needs the sudo password and shows pikaur's own
+diff prompts — never headless or `--nodiff`):
 ```bash
-P=<pkgname>
-D=$(mktemp -d)
-curl -fsS "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$P"  -o "$D/PKGBUILD"
-curl -fsS "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=$P"  -o "$D/.SRCINFO" 2>/dev/null || true
-# advisory marker scan:
-bash ~/.claude/skills/aur-safe-update/scripts/review-pkgbuild.sh "$D"
-# diff against the last recipe pikaur built (often absent if keepbuilddir=no):
-diff -u "$HOME/.cache/pikaur/build/$P/PKGBUILD" "$D/PKGBUILD" 2>/dev/null || echo "(no prior build cached — review the FULL recipe)"
+bash ~/.claude/skills/aur-safe-update/scripts/apply-update.sh --confirm
 ```
-Also fetch any referenced `*.install` and scan it. Summarize per package:
-**clean / REVIEW / HIGH** (and what the diff changed). **`review-pkgbuild.sh`
-exit 64 = "could not scan" = UNKNOWN → hold, never treat as clean.** Red flags to
-hold on: `npm/bun install` of an unknown dep, `atomic-lockfile`/`js-digest`,
-pipe-to-shell, `eval`/`base64 -d`, `/dev/tcp`, a new `post_install`/`prepare()`
-that fetches or runs code, `sha256sums=SKIP`, or a `source=` on a new host.
-⚠️ **Two known gaps (Tier-2 TODO):** (a) this reviews the cgit copy, but Step 4's
-`pikaur` clones its own — a maintainer can push between review and build (TOCTOU);
-the load-bearing review is pikaur's **own** diff prompt in Step 4. (b) Neither the
-scan nor the diff inspects fetched `source=()` trees, where upstream build hooks
-(e.g. a malicious `package.json`) also run.
+It re-verifies every pinned commit is **unchanged since review** (aborts if a recipe
+moved — the TOCTOU guard), then runs **one** `pikaur -Syu --needed` with held
+packages `--ignore`d — official repos and AUR upgrade together, so no partial-upgrade
+state. pikaur's diff prompt is the final per-package check; compare it to what Step 1
+showed. On success it refreshes the approved snapshots. Without `--confirm` it is a
+dry run (prints the exact command + held list, changes nothing).
 
-### Step 4 — apply approved AUR updates
-Present the verdict and **wait for explicit human approval**. Then update the
-cleared packages, **reading pikaur's own diff prompts** (do not pass `--nodiff`):
-```bash
-pikaur -S <vetted-pkg1> <vetted-pkg2>          # preferred when ANY package is held
-# only if nothing is held:  pikaur -Sua
-# alternative:  pikaur -Sua --ignore <held1> --ignore <held2>
-```
-Tell the user which packages were held and why (and to check the Arch pad before forcing them).
-
-### Step 5 — post-update sweep
+### Step 4 — post-update sweep
 ```bash
 bash ~/.claude/skills/aur-safe-update/scripts/scan-iocs.sh --fetch
 ```
@@ -128,5 +107,11 @@ Report: official packages updated, AUR packages updated, any held, and the verdi
   package matches a listed source name; the scanner reports `[VERIFY]`, not a
   false "clean".
 - Run `scan-iocs.sh` with **sudo** for the eBPF check (unprivileged runs report it `SKIPPED`).
-- **Split packages:** if `?h=$P` 404s, `$P` is a split member — fetch the pkgbase
-  (`pacman -Qi $P` → `Base`) instead, and treat any failed fetch as a hold.
+- **Automated by the plan/apply scripts:** commit-pinned review == built tree
+  (TOCTOU guard), single `pikaur -Syu` transaction (no partial upgrade), held
+  packages `--ignore`d, persistent approved-snapshot diffs, pkgbase/split
+  resolution (via `pikaur -G`), and the `--confirm` hard stop.
+- **Remaining gap (issue #3):** neither script inspects fetched `source=()` trees,
+  where an upstream `package.json` lifecycle hook / `setup.py` can also run at
+  build time. Until that lands, eyeball the sources of any REVIEW package that
+  pulls a VCS/tarball source.
