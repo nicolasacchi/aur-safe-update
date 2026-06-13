@@ -48,22 +48,65 @@ compromised-list cross-check is a removable "incident layer."
 
 ## Install
 
+Repeat these steps on **each Arch machine** you want it on (it's a per-user
+Claude Code skill, not a system package).
+
+**1. Prerequisites**
+
+```bash
+sudo pacman -S --needed git curl pacman-contrib      # checkupdates + git + curl
+```
+
+You also need an AUR helper — this skill targets [`pikaur`](https://github.com/actionless/pikaur).
+If you don't have one yet, bootstrap it once:
+
+```bash
+git clone https://aur.archlinux.org/pikaur.git && cd pikaur && makepkg -si && cd -
+```
+
+(`yay`/`paru` work too — adapt the `-Qua`/`-Syu`/`-G` calls; AUR enumeration needs
+a helper, **not** bare `pacman`.)
+
+**2. Clone the skill into your Claude Code skills directory**
+
 ```bash
 git clone https://github.com/nicolasacchi/aur-safe-update.git ~/.claude/skills/aur-safe-update
 chmod +x ~/.claude/skills/aur-safe-update/scripts/*.sh
 ```
 
-The skill's `name:` is `aur-safe-update`, matching the directory — keep them the
-same (Claude Code discovers skills by directory). Then in Claude Code, ask to
-update your system, or run `/aur-safe-update`.
+Keep the folder name `aur-safe-update` — Claude Code discovers skills by directory
+and it must match the skill's `name:`. That's it; start (or `/reload`) Claude Code
+and the `/aur-safe-update` skill is available.
 
-## Prerequisites
+**3. (optional) Pre-approve a known-genuine provides-alias** so sweeps run green:
 
-- [`pikaur`](https://github.com/actionless/pikaur) — the AUR helper this targets.
-  It is itself an AUR package; bootstrap it once per its README, or adapt the
-  commands for `yay`/`paru` (AUR enumeration needs a helper, not bare `pacman`).
-- `pacman-contrib` (provides `checkupdates`) — `sudo pacman -S pacman-contrib`
-- `curl`
+```bash
+mkdir -p ~/.config/aur-safe-update && echo 'stripe-cli-bin' >> ~/.config/aur-safe-update/allow.txt
+```
+
+**Update the skill later (any machine):**
+
+```bash
+git -C ~/.claude/skills/aur-safe-update pull
+```
+
+## Usage (inside Claude Code)
+
+Ask Claude to *“update my system”* (or run `/aur-safe-update`). It walks the flow
+and **pauses for your approval before anything is built or installed**:
+
+1. **Sweep** — host IOC check (run with `sudo` to include the eBPF check).
+2. **Plan** *(dry run)* — clones, **pins the commit**, and scans every pending AUR
+   update; prints **GO / REVIEW / HOLD**. `--sources` also scans fetched
+   `source=()` trees; `--devel` includes `-git`/`-svn` packages.
+3. **Approval gate** — it stops and shows you what will upgrade and what's held. It
+   never builds on its own.
+4. **Apply** — on your OK, run interactively:
+   `bash ~/.claude/skills/aur-safe-update/scripts/apply-update.sh --confirm`
+   — it re-verifies each pinned commit (TOCTOU guard) and runs **one**
+   `pikaur -Syu` (official repos + AUR together, held packages excluded), keeping
+   pikaur's own diff prompt as the final per-package check.
+5. **Re-sweep** to confirm a clean result.
 
 ## Using the scripts standalone
 
