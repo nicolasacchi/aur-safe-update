@@ -40,9 +40,11 @@ The **PKGBUILD diff review is the permanent, campaign-agnostic layer**; the
 compromised-list cross-check is a removable "incident layer."
 
 > [!NOTE]
-> This is a defensive scaffold with known limitations still being hardened
-> (TOCTOU between review and build, fetched-`source=()` not scanned, partial-
-> upgrade handling). See [open issues](https://github.com/nicolasacchi/aur-safe-update/issues).
+> The workflow runs as `plan-update.sh` (dry run: clone + pin commit + scan + diff)
+> → human approval → `apply-update.sh --confirm` (TOCTOU-guarded single
+> `pikaur -Syu` transaction). Optional `--sources` also scans fetched `source=()`
+> trees. Residual limits & future work are tracked in
+> [issues](https://github.com/nicolasacchi/aur-safe-update/issues).
 
 ## Install
 
@@ -65,33 +67,38 @@ update your system, or run `/aur-safe-update`.
 
 ## Using the scripts standalone
 
-Both scripts run without Claude — handy in CI or a cron healthcheck. Run from the
+All scripts run without Claude — handy in CI or a cron healthcheck. Run from the
 clone dir (or use absolute paths):
 
 ```bash
 cd ~/.claude/skills/aur-safe-update
 
+# full flow
+scripts/plan-update.sh --devel --sources        # dry run: clone+pin+scan all pending AUR updates
+scripts/apply-update.sh --confirm               # TOCTOU-guarded single `pikaur -Syu` (interactive)
+
 # IOC sweep + provides-aware compromised-list cross-check
 scripts/scan-iocs.sh --fetch                    # fetch the live community list
-scripts/scan-iocs.sh --list ./list.txt          # or use a local list
 sudo scripts/scan-iocs.sh --fetch               # sudo => also runs the eBPF check
 
-# Scan a PKGBUILD / *.install / .SRCINFO for markers
+# scan one recipe / one source tree directly
 scripts/review-pkgbuild.sh ~/.cache/pikaur/build/somepkg
+scripts/review-sources.sh  ~/.cache/pikaur/build/somepkg   # fetches+scans its source=()
 ```
 
 **Exit codes**
 - `scan-iocs.sh`: `0` clean · `1` needs attention / a check was skipped (e.g. eBPF
   without sudo) · `2` indicators found.
-- `review-pkgbuild.sh`: `0` no markers · `1` REVIEW (runs a toolchain/fetcher/
-  obfuscation/checksum-skip — eyeball it) · `2` HIGH-risk · `64` could not scan
-  (treat as UNKNOWN, not safe).
+- `review-pkgbuild.sh` / `review-sources.sh`: `0` no markers · `1` REVIEW · `2` HIGH-risk ·
+  `64` could not scan (treat as UNKNOWN, not safe).
+- `plan-update.sh`: writes the plan, always `0`. `apply-update.sh`: `10` no `--confirm`
+  (dry run) · `11` a recipe changed since review (TOCTOU abort) · else pikaur's status.
 
 > Without `sudo`, the eBPF check is reported `SKIPPED` (not a failure), so a
 > healthy host returns `0`. The eBPF rootkit check only looks for three known map
 > names — a clean result does not prove absence of a rootkit.
 
-**Environment knobs** (`scan-iocs.sh`)
+**Environment knobs**
 
 | Var | Default | Purpose |
 |-----|---------|---------|
@@ -99,6 +106,8 @@ scripts/review-pkgbuild.sh ~/.cache/pikaur/build/somepkg
 | `WINDOW_END` | **today** | end of the window (tracks the run date) |
 | `AUR_LIST_URL` | lenucksi raw list | override the compromised-name list source |
 | `AUR_SAFE_ALLOW` | *(empty)* | space-separated names to silence (also reads `~/.config/aur-safe-update/allow.txt`) |
+| `AUR_SAFE_SRC_MAXBYTES` | `26214400` | per-source download cap for `--sources` (bigger sources skipped) |
+| `AUR_SAFE_STATE` | `~/.cache/aur-safe-update` | plan file + approved-snapshot location |
 
 ### Why "provides-aware" matters
 

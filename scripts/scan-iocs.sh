@@ -112,26 +112,38 @@ if [[ $DO_LIST -eq 1 ]]; then
 fi
 
 # ---- (A) IOC sweep --------------------------------------------------------
-echo; echo "--- eBPF rootkit maps (/sys/fs/bpf/hidden_*) ---"
+echo; echo "--- eBPF pinned objects (/sys/fs/bpf, suspicious names) ---"
 if [[ -r /sys/fs/bpf ]]; then
-  found=$(ls /sys/fs/bpf/hidden_pids /sys/fs/bpf/hidden_names /sys/fs/bpf/hidden_inodes 2>/dev/null || true)
-  if [[ -n "$found" ]]; then echo "  WARNING: eBPF rootkit maps present:"; sed 's/^/    /' <<<"$found"; bump 2
-  else echo "  Clean: no known hidden_* maps (only checks 3 known names)."; fi
+  found=$(find /sys/fs/bpf -maxdepth 4 2>/dev/null | grep -iE '/(hidden|rootkit|conceal|stealth|hide)[^/]*$' || true)
+  if [[ -n "$found" ]]; then echo "  WARNING: suspiciously-named pinned BPF objects:"; sed 's/^/    /' <<<"$found"; bump 2
+  else echo "  Clean: no suspiciously-named pinned BPF objects."; fi
 else
   echo "  SKIPPED: /sys/fs/bpf not readable — re-run with sudo for the eBPF check."
   SKIPPED+=("eBPF maps (needs sudo)")
 fi
 
-echo; echo "--- systemd persistence (Restart=always + RestartSec=30) ---"
-shits=""
-for d in /etc/systemd/system "$HOME/.config/systemd/user"; do
+echo; echo "--- systemd persistence (auto-restart from a writable/temp/home/hidden path) ---"
+hot=""; warm=""; ninv=0
+for d in /etc/systemd/system /usr/lib/systemd/system /run/systemd/system \
+         /etc/systemd/user /usr/lib/systemd/user "$HOME/.config/systemd/user" \
+         "$HOME/.local/share/systemd/user"; do
   [[ -d "$d" ]] || continue
   while IFS= read -r svc; do
-    grep -q 'Restart=always' "$svc" 2>/dev/null && grep -q 'RestartSec=30' "$svc" 2>/dev/null && shits+="    $svc"$'\n'
-  done < <(find "$d" -name '*.service' -type f 2>/dev/null)
+    grep -qE '^[[:space:]]*Restart=(always|on-failure)' "$svc" 2>/dev/null || continue
+    ninv=$((ninv+1))
+    xs=$(grep -E '^[[:space:]]*ExecStart=' "$svc" 2>/dev/null | head -1); xs="${xs#*=}"
+    # hot = transient/world-writable (no legit persistent service lives here)
+    if printf '%s' "$xs" | grep -qE '/tmp/|/var/tmp/|/dev/shm/|/run/user/'; then
+      hot+="    $svc  [$xs]"$'\n'
+    # warm = $HOME or a hidden dir — usually a user's own service; verify
+    elif printf '%s' "$xs" | grep -qE '/home/|/[.][A-Za-z0-9_]'; then
+      warm+="    $svc  [$xs]"$'\n'
+    fi
+  done < <(find "$d" -maxdepth 2 -name '*.service' -type f 2>/dev/null)
 done
-if [[ -n "$shits" ]]; then echo "  WARNING: services matching the malware persistence profile:"; printf '%s' "$shits"; bump 2
-else echo "  Clean: no matching services (narrow heuristic — see Tier-2 TODO)."; fi
+[[ -n "$hot"  ]] && { echo "  WARNING: auto-restart service(s) from a transient/world-writable path:"; printf '%s' "$hot"; bump 2; }
+[[ -n "$warm" ]] && { echo "  REVIEW: auto-restart service(s) from \$HOME/hidden path (confirm they're yours):"; printf '%s' "$warm"; bump 1; }
+[[ -z "$hot$warm" ]] && echo "  Clean: $ninv auto-restart service(s) seen, none from a suspicious path."
 
 echo; echo "--- npm/bun caches + node_modules for ${IOC_PKGS[*]} ---"
 cache_hit=0
@@ -142,8 +154,11 @@ for pkg in "${IOC_PKGS[@]}"; do
 done
 [[ $cache_hit -eq 1 ]] && bump 2 || echo "  Clean: no malicious packages cached."
 
-echo; echo "--- dropped payload artifacts (atomic-lockfile / deps) ---"
-art=$(find "$HOME/.npm" "$HOME/.cache" "$HOME/.local" \( -name 'atomic-lockfile' -o -name 'atomic-lockfile-*.tgz' -o -name 'js-digest' -o -name 'js-digest-*.tgz' -o -path '*src/hooks/deps' \) 2>/dev/null | head -20)
+echo; echo "--- dropped payload artifacts (atomic-lockfile / js-digest / deps) ---"
+adirs=()
+for d in "$HOME/.npm" "$HOME/.cache" "$HOME/.local" "$HOME/.bun" "$HOME/.config/yarn" \
+         /tmp /var/tmp /dev/shm; do [[ -d "$d" ]] && adirs+=("$d"); done
+art=$(find "${adirs[@]}" \( -name 'atomic-lockfile' -o -name 'atomic-lockfile-*.tgz' -o -name 'js-digest' -o -name 'js-digest-*.tgz' -o -path '*src/hooks/deps' \) 2>/dev/null | head -20)
 if [[ -n "$art" ]]; then echo "  WARNING: artifacts found:"; sed 's/^/    /' <<<"$art"; bump 2
 else echo "  Clean: no dropped artifacts."; fi
 

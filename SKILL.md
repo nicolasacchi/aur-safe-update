@@ -25,6 +25,7 @@ bare `pacman` (`pacman -Qua` is invalid).
 - Bundled scripts (next to this file; make executable once):
   - `scripts/scan-iocs.sh` — IOC sweep + provides-aware compromised-list cross-check
   - `scripts/review-pkgbuild.sh` — PKGBUILD/.install marker scanner (advisory)
+  - `scripts/review-sources.sh` — fetches + scans `source=()` trees for lifecycle hooks/IOCs
   - `scripts/plan-update.sh` — clones + pins + scans pending AUR updates (dry run)
   - `scripts/apply-update.sh` — TOCTOU-guarded single-transaction apply (hard stop)
 - `git`, `sudo` (apply runs `pikaur -Syu` interactively)
@@ -60,11 +61,15 @@ creds, investigate) if confirmed. Capture the printed DIRECT/VERIFY names for St
 Preview official updates, then run the AUR planner:
 ```bash
 checkupdates 2>/dev/null            # official repo preview (signed/trusted)
-bash ~/.claude/skills/aur-safe-update/scripts/plan-update.sh           # add --devel for -git/-svn pkgs
+bash ~/.claude/skills/aur-safe-update/scripts/plan-update.sh           # --devel: include -git/-svn · --sources: also scan source=() trees
 ```
 `plan-update.sh` clones each pending AUR package, **pins the exact commit**, scans
-it with `review-pkgbuild.sh`, and diffs it against the last *approved* snapshot. It
-writes `~/.cache/aur-safe-update/plan.tsv` and prints a per-package verdict:
+it with `review-pkgbuild.sh`, and diffs it against the last *approved* snapshot.
+With `--sources` it also fetches each `source=()` tree and scans it
+(`review-sources.sh`) for npm/JS lifecycle hooks and IOC deps — slower, but closes
+the upstream-build-hook gap. `--devel` flags `-git`/`-svn` packages, which build
+from upstream HEAD (the commit pin covers only the recipe) and are always REVIEW.
+It writes `~/.cache/aur-safe-update/plan.tsv` and prints a per-package verdict:
 - **GO** — unchanged since last approval, no markers.
 - **REVIEW** — recipe changed, or a `[REVIEW]`/`[HOOK]` marker — a human reads the shown lines/diff.
 - **HOLD** — `[HIGH]`/NUL/scan-failed (exit 64) — auto-excluded from the upgrade.
@@ -111,7 +116,8 @@ Report: official packages updated, AUR packages updated, any held, and the verdi
   (TOCTOU guard), single `pikaur -Syu` transaction (no partial upgrade), held
   packages `--ignore`d, persistent approved-snapshot diffs, pkgbase/split
   resolution (via `pikaur -G`), and the `--confirm` hard stop.
-- **Remaining gap (issue #3):** neither script inspects fetched `source=()` trees,
-  where an upstream `package.json` lifecycle hook / `setup.py` can also run at
-  build time. Until that lands, eyeball the sources of any REVIEW package that
-  pulls a VCS/tarball source.
+- **Source scanning (`--sources`):** `review-sources.sh` fetches each `source=()`
+  (git clone / archive extract, read-only — never runs build/install hooks) and
+  flags npm/JS lifecycle hooks, IOC deps in manifests/lockfiles, and shell droppers.
+  Limitation: binary `-bin` sources and downloads over `AUR_SAFE_SRC_MAXBYTES`
+  (25 MiB) are skipped, so it adds little for `-bin` packages.
